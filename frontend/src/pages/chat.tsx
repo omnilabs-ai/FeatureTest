@@ -1,81 +1,89 @@
 import React, { useState } from 'react';
+import axios from 'axios';
 
 const Chat = () => {
     const [responseText, setResponseText] = useState('Response will appear here');
     const [isLoading, setIsLoading] = useState(false);
+    const [metadata, setMetadata] = useState("");
 
     const handleSendMessage = async () => {
         try {
-            setIsLoading(true);
             setResponseText('');
+            setMetadata("");
+            const payload = {
+                userid: 'user123',
+                messages: [
+                    { role: 'user', content: 'Build a python script that is a fastapi server that prints "Hello, World!" to the console.' }
+                ],
+                max_latency: 'BALANCED',
+                max_cost: 'BALANCED',
+                model_list: []
+            };
             
-            const response = await fetch("http://localhost:9000/smartchat", {
-                method: "POST",
+            const response = await fetch('http://localhost:9000/smartchat', {
+                method: 'POST',
                 headers: {
-                    "Content-Type": "application/json",
+                    'Content-Type': 'application/json',
+                    'Accept': 'text/event-stream'
                 },
-                body: JSON.stringify({ 
-                    messages: [{ role: "user", content: "Write me a page long poem about a cat" }] 
-                }),
+                body: JSON.stringify(payload)
             });
-
+    
             if (!response.ok) {
-                throw new Error(`HTTP error! status: ${response.status}`);
+                throw new Error(`Server responded with ${response.status}: ${response.statusText}`);
             }
-
-            // Create a new ReadableStream from the response body
-            const reader = response.body?.getReader();
-            if (!reader) {
-                throw new Error('Response body is not readable');
-            }
-
-            // Read the stream
-            const decoder = new TextDecoder();
-            let buffer = '';
-            let done = false;
             
-            while (!done) {
-                const { value, done: doneReading } = await reader.read();
-                done = doneReading;
+            if (!response.body) {
+                throw new Error('Response body is null');
+            }
+    
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            
+            // Keep track of previously processed events to avoid duplicates
+            const processedEvents = new Set();
+            
+            while (true) {
+                const { value, done } = await reader.read();
                 
-                if (value) {
-                    // Decode the chunk and add it to our buffer
-                    buffer += decoder.decode(value, { stream: !done });
-                    
-                    // Process any complete messages in the buffer
-                    const lines = buffer.split('\n');
-                    buffer = lines.pop() || ''; // Keep the last incomplete line in the buffer
-                    
-                    for (const line of lines) {
-                        if (line.startsWith('data: ')) {
-                            const data = line.slice(6); // Remove 'data: ' prefix
-                            
-                            if (data === '[DONE]') {
-                                continue;
-                            }
-                            
-                            try {
-                                const parsed = JSON.parse(data);
-                                if (parsed.content) {
-                                    setResponseText(prev => prev + parsed.content);
-                                }
-                                if (parsed.error) {
-                                    setResponseText(prev => prev + '\nError: ' + parsed.error);
-                                }
-                            } catch (e) {
-                                console.warn('Failed to parse SSE data:', data);
-                            }
+                if (done) break;
+                
+                const chunk = decoder.decode(value, { stream: true });
+                const lines = chunk.split('\n');
+                
+                let currentEvent = null;
+                
+                for (const line of lines) {
+                    if (line.startsWith('event:')) {
+                        currentEvent = line.substring(6).trim();
+                    } else if (line.startsWith('data:') && currentEvent) {
+                        const data = JSON.parse(line.substring(5).trim());
+                        // Create a unique key for this event+data combination
+                        const eventKey = `${currentEvent}:${data}`;
+                        
+                        // Only log if we haven't seen this exact event+data before
+                        if (!processedEvents.has(eventKey)) {
+                            console.log(`[${new Date().toISOString()}] Event: ${currentEvent}, Data: ${data}`);
+                            processedEvents.add(eventKey);
+                        }
+                        if (currentEvent === 'routing') {
+                            setMetadata(data);
+                            // await new Promise(resolve => setTimeout(resolve, 1000));
+                        }
+                        if (currentEvent === 'completion') {
+                            setResponseText(prevText => prevText + data);
                         }
                     }
                 }
             }
-        } catch (error: any) {
-            console.error('Error:', error);
-            setResponseText(`Error: ${error.message || 'Unknown error occurred'}`);
-        } finally {
-            setIsLoading(false);
+            
+        } catch (error) {
+            console.error('Streaming error:', error);
         }
     };
+    
+    
+    
 
     return (
         <div>
@@ -96,6 +104,12 @@ const Chat = () => {
             }}>
                 <p>{responseText}</p>
             </div>
+            {metadata && (
+                <div style={{ marginTop: '20px' }}>
+                    <h3>Metadata:</h3>
+                    <pre>{JSON.stringify(metadata, null, 2)}</pre>
+                </div>
+            )}
         </div>
     );
 };
